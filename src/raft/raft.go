@@ -167,7 +167,12 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	if rf.state == follower && rf.currentTerm < args.Term || rf.voteFor == -1{	//Term enough
+	if args.Term < rf.currentTerm {
+		reply.VoteGrated = false
+		reply.CurrentTerm = rf.currentTerm
+		return
+	}
+	if rf.voteFor == -1 || rf.voteFor == args.CandidateId {	//Term enough
 		rf.waitTime = 0
 		rf.currentTerm = args.Term        //  don't be hurry
 		rf.voteFor = args.CandidateId
@@ -175,7 +180,6 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		reply.VoteGrated = true
 		fmt.Printf("%v vote the %v\n", rf.me, args.CandidateId)
 	}else if(rf.currentTerm < args.Term){
-		rf.waitTime = 0
 		rf.currentTerm = args.Term
 		rf.state = follower
 	}
@@ -190,19 +194,9 @@ func (rf *Raft) ReceiveHeartbeat(args *AppendEntries, reply *AppendEntriesReply)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
-	}
-	if rf.state == follower && args.Term >= rf.currentTerm{
+	}else{
 		rf.currentTerm = args.Term
-		rf.waitTime = 0
-		rf.voteFor = -1
-	}else if rf.state == candidate && args.Term >= rf.currentTerm{
 		rf.state = follower
-		rf.currentTerm = args.Term
-		rf.waitTime = 0
-		rf.voteFor = -1
-	}else if rf.state == leader && args.Term >= rf.currentTerm{
-		rf.state = follower
-		rf.currentTerm = args.Term
 		rf.waitTime = 0
 		rf.voteFor = -1
 	}
@@ -251,6 +245,7 @@ func (rf *Raft) sendHeartbeat(server int, args *AppendEntries, reply *AppendEntr
 func (rf *Raft) SendRequestVote(serverid int) RequestVoteReply{
 	args := RequestVoteArgs{}
 	reply := RequestVoteReply{}
+	reply.VoteGrated = false
 	args.Term = rf.currentTerm
 	args.CandidateId = rf.me
 	count := 0
@@ -259,6 +254,7 @@ func (rf *Raft) SendRequestVote(serverid int) RequestVoteReply{
 		//	fmt.Printf("%v requestvote succeed.\n", serverid)
 			break
 		}
+		break
 		//fmt.Printf("%v requestvote failed.\n", serverid)
 		count++
 		time.Sleep(10 * time.Millisecond)
@@ -279,6 +275,7 @@ func (rf *Raft) SendHeartbeat(server int) AppendEntriesReply{
 		if ok := rf.sendHeartbeat(server, &args, &reply); ok{
 			break
 		}
+		break
 		count++
 		time.Sleep(10 * time.Millisecond)
 		if(count > 1){
@@ -349,14 +346,26 @@ func (rf *Raft) transcandidate() {
 			continue
 		}
 		done.Add(1)
+		transfollow := false
 		go func(i int){
+			//t1 := time.Now().UnixNano()/int64(time.Second)
 			reply := rf.SendRequestVote(i)
+			if reply.CurrentTerm > rf.currentTerm {
+				transfollow = true
+			}
 			if reply.VoteGrated == true{
 			//	replys = append(replys, reply)
 				votecount++;
 			}
+			//t2 := time.Now().UnixNano()/int64(time.Second)
+			//fmt.Printf("%v elapsed %v\n", i, t2-t1)
 			done.Done()
 		}(i)
+		if transfollow == true{
+			rf.state = follower
+			rf.voteFor = i
+			return
+		}
 	}
 	done.Wait()
 	fmt.Printf("%v get %v votes.\n", rf.me, votecount)
@@ -415,8 +424,8 @@ func (rf *Raft) candidateProcessing() {
 
 func (rf *Raft) leaderProcessing(){
 	rf.waitTime = 0
-	rf.sendHeartbeatAll()
-	time.Sleep(100 * time.Millisecond)
+	go rf.sendHeartbeatAll()    //if a server is lost, if can still transport periodly
+	time.Sleep(300 * time.Millisecond)
 }
 
 func (rf *Raft) serverWork(){

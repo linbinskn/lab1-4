@@ -62,10 +62,8 @@ func TestReElection2A(t *testing.T) {
 	// if the leader disconnects, a new one should be elected.	
 	fmt.Printf("disconnect %v.\n", leader1)
 	cfg.disconnect(leader1)
-	time.Sleep(5*time.Second)
 	cfg.checkOneLeader()
 	fmt.Printf("pass 2\n")
-	time.Sleep(5*time.Second)
 
 	// if the old leader rejoins, that shouldn't
 	// disturb the new leader.
