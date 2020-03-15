@@ -89,6 +89,8 @@ func TestReElection2A(t *testing.T) {
 	cfg.end()
 }
 
+
+
 func TestBasicAgree2B(t *testing.T) {
 	servers := 3
 	cfg := make_config(t, servers, false)
@@ -111,6 +113,9 @@ func TestBasicAgree2B(t *testing.T) {
 
 	cfg.end()
 }
+
+
+
 
 //
 // check, based on counting bytes of RPCs, that
