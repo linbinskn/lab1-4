@@ -184,13 +184,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("%v requestvote term %v state %v \n", rf.me, rf.currentTerm, rf.state)
+	//fmt.Printf("%v requestvote term %v state %v \n", rf.me, rf.currentTerm, rf.state)
 	if args.Term < rf.currentTerm {
 		reply.VoteGrated = false
 		reply.CurrentTerm = rf.currentTerm
 		return
 	}
-	if rf.voteFor == -1 || rf.voteFor == args.CandidateId && args.LastlogIndex >= len(rf.logs)-1 && args.LastlogTerm >= rf.logs[len(rf.logs)-1].Term{	//Term enough
+	voteflag := (rf.voteFor == -1 || rf.voteFor == args.CandidateId)
+	if voteflag && args.LastlogIndex >= len(rf.logs)-1 && args.LastlogTerm >= rf.logs[len(rf.logs)-1].Term{	//Term enough
 		rf.waitTime = 0
 		rf.currentTerm = args.Term        //  don't be hurry
 		rf.voteFor = args.CandidateId
@@ -208,14 +209,30 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 
 func (rf *Raft) ReceiveAppendEntries(args *AppendEntries, reply *AppendEntriesReply){
 	rf.waitTime = 0
-	match := (rf.logs[args.Pervlogindex].Term == args.Pervlogterm)
-	if args.Term < rf.currentTerm || match == false{
+	rf.state = follower
+	rf.voteFor = -1
+	var match bool
+	if args.Pervlogindex >= len(rf.logs) {
+		match = false
+	}else {
+		match = (rf.logs[args.Pervlogindex].Term == args.Pervlogterm)
+	}
+	if args.Term < rf.currentTerm {
+		fmt.Printf("args.Term:%v, currentTerm:%v, match:%v\n", args.Term, rf.currentTerm, match)
+		reply.Term = rf.currentTerm
+		reply.Success = false
+		return
+	}
+	rf.state = follower
+	rf.voteFor = -1
+	rf.waitTime = 0
+	if match == false {
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
 	}
 	rf.logs = append(rf.logs[:args.Pervlogindex+1], args.Entries...)
-	rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
+	//rf.commitIndex = min(args.LeaderCommit, len(rf.logs)-1)
 	reply.Term = rf.currentTerm
 	reply.Success = true
 	return
@@ -241,6 +258,7 @@ func (rf *Raft) ReceiveHeartbeat(args *AppendEntries, reply *AppendEntriesReply)
 				applymsg := ApplyMsg{true, rf.logs[i].Command, i}
 				*rf.applyCh <- applymsg
 				rf.lastApplied = i
+				time.Sleep(10 * time.Millisecond)
 			}
 		}
 	}
@@ -352,15 +370,21 @@ func (rf *Raft) AppendEntries(server int) AppendEntriesReply{
 		nextIndex := len(rf.logs)
 		rf.mu.Unlock()
 		if ok := rf.sendAppendEntries(server, &args, &reply); ok{
-			//break
+		}else {
+			fmt.Printf("%v append connect %v fail, nextIndex %v\n", rf.me, server, rf.nextIndex[server])
+			break
 		}
 		//break
 		if reply.Success == true{
-			fmt.Printf("append server %v succeed\n", server)
+			fmt.Printf("%v append server %v succeed, nextIndex %v, prenextIndex %v\n", rf.me, server, nextIndex, rf.nextIndex[server])
 			rf.nextIndex[server] = nextIndex
 			rf.matchIndex[server] = nextIndex-1
 			break
 		}else{
+			//fmt.Printf("server:%v, %v minus 1\n", server, rf.nextIndex[server])
+			if(reply.Term > rf.currentTerm){
+				return reply
+			}
 			rf.nextIndex[server]--
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -397,6 +421,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	rf.logs = append(rf.logs, log)
 	index = rf.nextIndex[rf.me]
 	rf.nextIndex[rf.me]++
+	rf.matchIndex[rf.me] = len(rf.logs)-1
 	term = log.Term
 	return index, term, isLeader
 }
@@ -432,17 +457,23 @@ func (rf *Raft) transcandidate() {
 
 	var done sync.WaitGroup
 	votecount := 0
+
+	transfollow := false
 	for i := 0; i < len(rf.peers) ; i++{
 		if i == rf.me{
 			continue
 		}
 		done.Add(1)
-		transfollow := false
+
 		go func(i int){
 			//t1 := time.Now().UnixNano()/int64(time.Second)
 			reply := rf.SendRequestVote(i)
 			if reply.CurrentTerm > rf.currentTerm {
 				transfollow = true
+				rf.currentTerm = reply.CurrentTerm
+				rf.state = follower
+				rf.voteFor = -1
+				return
 			}
 			if reply.VoteGrated == true{
 				votecount++;
@@ -453,7 +484,6 @@ func (rf *Raft) transcandidate() {
 		}(i)
 		if transfollow == true{
 			rf.state = follower
-			rf.voteFor = i
 			return
 		}
 	}
@@ -461,6 +491,9 @@ func (rf *Raft) transcandidate() {
 	fmt.Printf("%v get %v votes.\n", rf.me, votecount)
 	if(votecount+1 > rf.serverNum/2){
 		rf.state = leader
+		for i := 0; i < len(rf.nextIndex); i++ {
+			rf.nextIndex[i] = len(rf.logs)
+		}
 		time.Sleep(50 * time.Millisecond)
 		fmt.Printf("%v become a leader\n", rf.me)
 	}
@@ -473,6 +506,7 @@ func (rf *Raft) sendHeartbeatAll(){
 		return
 	}
 	var done sync.WaitGroup
+	transfollow := false
 	for i := 0; i < len(rf.peers); i++ {
 		if i == rf.me{		//notice don't send heartbeat to yourself
 			continue
@@ -481,7 +515,6 @@ func (rf *Raft) sendHeartbeatAll(){
 			return
 		}
 		done.Add(1)
-		transfollow := false
 		go func(i int){
 			reply := AppendEntriesReply{}
 			if rf.nextIndex[i] >= rf.nextIndex[rf.me] {
@@ -491,13 +524,14 @@ func (rf *Raft) sendHeartbeatAll(){
 			}
 
 			if(reply.Term > rf.currentTerm){
+				rf.currentTerm = reply.Term
+				rf.state = follower
+				rf.voteFor = -1
 				transfollow = true
 			}
 			done.Done()
 		}(i)
 		if transfollow == true {
-			rf.state = follower
-			rf.voteFor = i
 			return
 		}
 	}
@@ -517,7 +551,7 @@ func (rf *Raft) followerProcessing(){
 
 
 func (rf *Raft) candidateProcessing() {
-	if(rf.waitTime > rf.electTime){
+	if(rf.waitTime > rf.electTime && rf.voteFor == -1){
 		fmt.Printf("%v rebegin an election.\n", rf.me)
 		fmt.Printf("%v term is %v\n", rf.me, rf.currentTerm)
 		rf.transcandidate()
@@ -562,6 +596,7 @@ func (rf *Raft) increcommitIndex() {
 			for k := commitIndex+1; k <= rf.commitIndex; k++{
 				applymsg := ApplyMsg{true, rf.logs[k].Command, k}
 				*rf.applyCh <- applymsg
+				time.Sleep(10 * time.Millisecond)
 				rf.lastApplied = k
 			}
 			break
