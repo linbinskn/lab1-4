@@ -184,14 +184,20 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (2A, 2B).
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	//fmt.Printf("%v requestvote term %v state %v \n", rf.me, rf.currentTerm, rf.state)
+	fmt.Printf("%v requestvote term %v state %v \n", rf.me, rf.currentTerm, rf.state)
 	if args.Term < rf.currentTerm {
 		reply.VoteGrated = false
 		reply.CurrentTerm = rf.currentTerm
 		return
 	}
+	if args.Term > rf.currentTerm{
+		rf.state = follower
+		rf.voteFor = -1
+		rf.waitTime = 0
+		rf.currentTerm = args.Term
+	}
 	voteflag := (rf.voteFor == -1 || rf.voteFor == args.CandidateId)
-	if voteflag && args.LastlogIndex >= len(rf.logs)-1 && args.LastlogTerm >= rf.logs[len(rf.logs)-1].Term{	//Term enough
+	if voteflag && args.LastlogTerm >= rf.logs[len(rf.logs)-1].Term{	//Only Term is enough
 		rf.waitTime = 0
 		rf.currentTerm = args.Term        //  don't be hurry
 		rf.voteFor = args.CandidateId
@@ -201,16 +207,17 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	}else if(rf.currentTerm < args.Term){
 		rf.currentTerm = args.Term
 		rf.state = follower
-		rf.voteFor = args.CandidateId        //attention
+		//rf.waitTime = 0
+		//rf.voteFor = args.CandidateId        //attention
 	}
 	return
 }
 
 
 func (rf *Raft) ReceiveAppendEntries(args *AppendEntries, reply *AppendEntriesReply){
-	rf.waitTime = 0
-	rf.state = follower
-	rf.voteFor = -1
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	fmt.Printf("%v receive appendentries from %v\n", rf.me, args.LeaderId)
 	var match bool
 	if args.Pervlogindex >= len(rf.logs) {
 		match = false
@@ -218,7 +225,7 @@ func (rf *Raft) ReceiveAppendEntries(args *AppendEntries, reply *AppendEntriesRe
 		match = (rf.logs[args.Pervlogindex].Term == args.Pervlogterm)
 	}
 	if args.Term < rf.currentTerm {
-		fmt.Printf("args.Term:%v, currentTerm:%v, match:%v\n", args.Term, rf.currentTerm, match)
+		fmt.Printf("me:%v, args.Term:%v, currentTerm:%v, match:%v\n", rf.me, args.Term, rf.currentTerm, match)
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -258,7 +265,6 @@ func (rf *Raft) ReceiveHeartbeat(args *AppendEntries, reply *AppendEntriesReply)
 				applymsg := ApplyMsg{true, rf.logs[i].Command, i}
 				*rf.applyCh <- applymsg
 				rf.lastApplied = i
-				time.Sleep(10 * time.Millisecond)
 			}
 		}
 	}
@@ -369,9 +375,12 @@ func (rf *Raft) AppendEntries(server int) AppendEntriesReply{
 		args.LeaderCommit = rf.commitIndex
 		nextIndex := len(rf.logs)
 		rf.mu.Unlock()
+		if rf.state != leader {
+			break
+		}
 		if ok := rf.sendAppendEntries(server, &args, &reply); ok{
 		}else {
-			fmt.Printf("%v append connect %v fail, nextIndex %v\n", rf.me, server, rf.nextIndex[server])
+			//fmt.Printf("%v append connect %v fail, nextIndex %v\n", rf.me, server, rf.nextIndex[server])
 			break
 		}
 		//break
@@ -386,8 +395,8 @@ func (rf *Raft) AppendEntries(server int) AppendEntriesReply{
 				return reply
 			}
 			rf.nextIndex[server]--
-			time.Sleep(10 * time.Millisecond)
 		}
+		break
 	}
 	return reply
 }
@@ -416,7 +425,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 		return index, term, isLeader
 	}
-	fmt.Printf("leader add logs\n")
 	log := Log{command, rf.currentTerm}
 	rf.logs = append(rf.logs, log)
 	index = rf.nextIndex[rf.me]
@@ -484,6 +492,7 @@ func (rf *Raft) transcandidate() {
 		}(i)
 		if transfollow == true{
 			rf.state = follower
+			rf.waitTime = 0
 			return
 		}
 	}
@@ -551,7 +560,7 @@ func (rf *Raft) followerProcessing(){
 
 
 func (rf *Raft) candidateProcessing() {
-	if(rf.waitTime > rf.electTime && rf.voteFor == -1){
+	if(rf.waitTime > rf.electTime){
 		fmt.Printf("%v rebegin an election.\n", rf.me)
 		fmt.Printf("%v term is %v\n", rf.me, rf.currentTerm)
 		rf.transcandidate()
@@ -561,7 +570,7 @@ func (rf *Raft) candidateProcessing() {
 
 func (rf *Raft) leaderProcessing(){
 	rf.waitTime = 0
-	go rf.sendHeartbeatAll()    //if a server is lost, if can still transport periodly
+	go rf.sendHeartbeatAll()    //if a server is lost, it can still transport periodly
 	time.Sleep(100 * time.Millisecond)
 	rf.increcommitIndex()
 	time.Sleep(100 * time.Millisecond)
