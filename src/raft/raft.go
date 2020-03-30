@@ -175,6 +175,7 @@ type AppendEntries struct {
 type AppendEntriesReply struct {
 	Term	      int
 	Success       bool
+	MatchTermindex int
 }
 
 //
@@ -217,7 +218,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 func (rf *Raft) ReceiveAppendEntries(args *AppendEntries, reply *AppendEntriesReply){
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
-	fmt.Printf("%v receive appendentries from %v\n", rf.me, args.LeaderId)
+	fmt.Printf("%v receive appendentries from %v Pervlogindex %v\n", rf.me, args.LeaderId, args.Pervlogindex)
 	var match bool
 	if args.Pervlogindex >= len(rf.logs) {
 		match = false
@@ -236,6 +237,12 @@ func (rf *Raft) ReceiveAppendEntries(args *AppendEntries, reply *AppendEntriesRe
 	if match == false {
 		reply.Term = rf.currentTerm
 		reply.Success = false
+		for i := args.Pervlogindex; i > 0 && i < len(rf.logs); i--{
+			if rf.logs[i].Term == args.Pervlogterm{
+				reply.MatchTermindex = i
+				break
+			}
+		}
 		return
 	}
 	rf.logs = append(rf.logs[:args.Pervlogindex+1], args.Entries...)
@@ -249,7 +256,13 @@ func (rf *Raft) ReceiveHeartbeat(args *AppendEntries, reply *AppendEntriesReply)
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 	reply.Success = true
-	if args.Term < rf.currentTerm {
+	var match bool
+	if args.Pervlogindex >= len(rf.logs){
+		match = false
+	}else {
+		match = (rf.logs[args.Pervlogindex].Term == args.Pervlogterm)
+	}
+	if args.Term < rf.currentTerm || !match{
 		reply.Term = rf.currentTerm
 		reply.Success = false
 		return
@@ -345,6 +358,8 @@ func (rf *Raft) SendHeartbeat(server int) AppendEntriesReply{
 	args.Term = rf.currentTerm
 	args.LeaderId = rf.me
 	args.LeaderCommit = rf.commitIndex
+	args.Pervlogindex = rf.nextIndex[server]-1
+	args.Pervlogterm = rf.logs[args.Pervlogindex].Term
 	count := 0
 	for{
 		if ok := rf.sendHeartbeat(server, &args, &reply); ok{
@@ -394,7 +409,22 @@ func (rf *Raft) AppendEntries(server int) AppendEntriesReply{
 			if(reply.Term > rf.currentTerm){
 				return reply
 			}
+			var i int
+			for i = rf.nextIndex[server]-1; i > 0; i--{ //optimize append reject
+				if rf.logs[i].Term != rf.logs[i+1].Term{
+					rf.nextIndex[server] = i
+					break
+				}
+			}
+			if i == 0{
+				rf.nextIndex[server]--
+			}
+			/*
 			rf.nextIndex[server]--
+			if reply.MatchTermindex < rf.nextIndex[server] && reply.MatchTermindex > 0{
+				rf.nextIndex[server] = reply.MatchTermindex
+			}	//optimize the nextindex decrement
+			*/
 		}
 		break
 	}
@@ -502,6 +532,7 @@ func (rf *Raft) transcandidate() {
 		rf.state = leader
 		for i := 0; i < len(rf.nextIndex); i++ {
 			rf.nextIndex[i] = len(rf.logs)
+			//rf.matchIndex[i] = 0
 		}
 		time.Sleep(50 * time.Millisecond)
 		fmt.Printf("%v become a leader\n", rf.me)
@@ -571,9 +602,9 @@ func (rf *Raft) candidateProcessing() {
 func (rf *Raft) leaderProcessing(){
 	rf.waitTime = 0
 	go rf.sendHeartbeatAll()    //if a server is lost, it can still transport periodly
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
 	rf.increcommitIndex()
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(80 * time.Millisecond)
 }
 
 func (rf *Raft) serverWork(){
@@ -608,6 +639,7 @@ func (rf *Raft) increcommitIndex() {
 				time.Sleep(10 * time.Millisecond)
 				rf.lastApplied = k
 			}
+			fmt.Printf("leader %v commitindex succeed update to %v\n", rf.me, rf.commitIndex)
 			break
 		}
 	}
