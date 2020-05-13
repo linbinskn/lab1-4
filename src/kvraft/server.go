@@ -8,7 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"fmt"
+	//"fmt"
 )
 
 const Debug = 0
@@ -70,7 +70,11 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	op.Key = args.Key
 	op.Clerkid = args.Clerkid
 	op.Seq = args.Seq
-	index, term, isLeader := kv.rf.Start(op)
+	if _, isleader := kv.rf.GetState(); !isleader{
+		reply.Err = ErrWrongLeader
+		return
+	}
+	index, term, _ := kv.rf.Start(op)
 	kv.mu.Lock()
 	/*
 	if value, ok := kv.duptable[args.Clerkid]; ok && args.Seq <= value{
@@ -80,11 +84,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	}
 	*/
 	//index, term, isLeader := kv.rf.Start(op)
-	if !isLeader {
-		reply.Err = ErrWrongLeader
-		kv.mu.Unlock()
-		return
-	}
+	//if !isLeader {
+	//	reply.Err = ErrWrongLeader
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	//fmt.Printf("Get server %v is leader key:%v, clerkid:%v, index:%v\n", kv.me, args.Key, args.Clerkid, index)
 	kv.MatchlogAdd(index, term, op)
 	kv.remindchan[index] = make(chan Err)
 	kv.mu.Unlock()
@@ -93,6 +98,7 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 		kv.mu.Lock()
 		delete(kv.remindchan, index)
 		reply.Err = ErrTimeOut
+		//fmt.Printf("leader %v timeout\n", kv.me)
 		kv.mu.Unlock()
 		return
 	case reply.Err =<-kv.remindchan[index]:
@@ -127,27 +133,32 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
-	fmt.Printf("Get into PutAppend server %v\n", kv.me)
+	//fmt.Printf("Get into PutAppend server %v\n", kv.me)
 	op := Op{}
 	op.Operation = args.Op
 	op.Key = args.Key
 	op.Value = args.Value
 	op.Clerkid = args.Clerkid
 	op.Seq = args.Seq
-	index, term, isLeader := kv.rf.Start(op)
 	kv.mu.Lock()
 	if value, ok := kv.duptable[args.Clerkid]; ok && args.Seq <= value{
 		reply.Err = ErrdupTwice
 		kv.mu.Unlock()
 		return
 	}
-	//index, term, isLeader := kv.rf.Start(op)
-	if !isLeader {
+	if _, isleader := kv.rf.GetState(); !isleader{
 		reply.Err = ErrWrongLeader
 		kv.mu.Unlock()
 		return
 	}
-	fmt.Printf("server %v is leader\n", kv.me)
+	index, term, _ := kv.rf.Start(op)
+	//index, term, isLeader := kv.rf.Start(op)
+	//if !isLeader {
+	//	reply.Err = ErrWrongLeader
+	//	kv.mu.Unlock()
+	//	return
+	//}
+	//fmt.Printf("Put server %v is leader, key:%v, value:%v, clerkid:%v, index:%v\n", kv.me, op.Key, op.Value, op.Clerkid, index)
 	kv.MatchlogAdd(index, term, op)
 	kv.remindchan[index] = make(chan Err)
 	kv.mu.Unlock()
@@ -168,7 +179,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 
 	}
 	reply.Err=<-kv.remindchan[index]
-	fmt.Printf("server %v get remindchan reply.Err %v\n", kv.me,reply.Err)
+	//fmt.Printf("server %v get remindchan reply.Err %v\n", kv.me,reply.Err)
 	if reply.Err == ErrloseLeader {
 		return
 	}
@@ -198,14 +209,29 @@ func (kv *KVServer) killed() bool {
 	return z == 1
 }
 
+func max(a int64, b int64) int64 {
+	if a > b{
+		return a
+	}
+	return b
+}
+
 func (kv *KVServer) apply() {
 	for {
 		select{
 		case applymsg :=<-kv.applyCh:
 			index := applymsg.CommandIndex
 			op := applymsg.Command.(Op)
-			fmt.Printf("server %v msg come key:%v, value:%v\n",kv.me,op.Key, op.Value)
 			term := applymsg.Term
+			leaderid := applymsg.LeaderId
+			//fmt.Printf("server %v msg come key:%v, value:%v, seq:%v, clerkid:%v, leaderid:%v\n",kv.me,op.Key, op.Value, op.Seq, op.Clerkid, leaderid)
+			kv.mu.Lock()
+			if value, ok := kv.duptable[op.Clerkid]; ok && op.Seq <= value && op.Operation != "Get"{
+				//fmt.Printf("server %v seq duplicate, seq:%v maxseq:%v\n", kv.me, op.Seq, value)
+				kv.mu.Unlock()
+				continue
+			}
+
 			if op.Operation == "Put" {
 				kv.statemachine[op.Key] = op.Value
 			}else if op.Operation == "Append" {
@@ -215,54 +241,40 @@ func (kv *KVServer) apply() {
 					kv.statemachine[op.Key] = op.Value
 				}
 			}
-			kv.duptable[op.Clerkid] = op.Seq
+			kv.duptable[op.Clerkid] = max(op.Seq, kv.duptable[op.Clerkid])
+			/*
+			if _, isleader := kv.rf.GetState(); !isleader{
+				continue
+			}
+			if leaderid != kv.me {
+				continue
+			}
+			*/
+			if leaderid != kv.me {
+				kv.mu.Unlock()
+				continue
+			}
+
+			if _, ok := kv.remindchan[index]; !ok {
+				//fmt.Printf("server %v index %v chan has been deleted\n", kv.me, index)
+				kv.mu.Unlock()
+				continue
+			}
 			var err Err
 			if op != kv.matchlogs[index].op || term != kv.matchlogs[index].term {
 				err = ErrloseLeader
 			}else {
 				err = Success
 			}
+			kv.mu.Unlock()
 			kv.remindchan[index] <- err
-			fmt.Printf("err insert into remindchan by channel\n")
+			//fmt.Printf("server %v err insert into remindchan by channel\n", kv.me)
 			time.Sleep(5 * time.Millisecond)
 		case <-kv.deadchan:
+			//fmt.Printf("close the chan, server %v\n", kv.me)
 			return
 		}
-		fmt.Printf("server %v apply\n",kv.me)
-		applymsg :=<-kv.applyCh
-		index := applymsg.CommandIndex
-		op := applymsg.Command.(Op)
-		fmt.Printf("server %v msg come key:%v, value:%v\n",kv.me,op.Key, op.Value)
-		term := applymsg.Term
-		if op.Operation == "Put" {
-			kv.statemachine[op.Key] = op.Value
-		}else if op.Operation == "Append" {
-			if _, ok := kv.statemachine[op.Key]; ok {
-				kv.statemachine[op.Key] += op.Value
-			}else {
-				kv.statemachine[op.Key] = op.Value
-			}
 		}
-		kv.duptable[op.Clerkid] = op.Seq
-		var err Err
-		if op != kv.matchlogs[index].op || term != kv.matchlogs[index].term {
-			err = ErrloseLeader
-		}else {
-			err = Success
-		}
-		kv.remindchan[index] <- err
-		fmt.Printf("err insert into remindchan by channel\n")
-		time.Sleep(5 * time.Millisecond)
-		/*
-		_, isleader := kv.rf.GetState()
-		if isleader{
-			kv.mu.Lock()
-			close(kv.remindchan[index])
-			kv.mu.Unlock()
-		}
-		time.Sleep(5 * time.Millisecond)
-		*/
-	}
 }
 //
 // servers[] contains the ports of the set of

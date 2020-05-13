@@ -3,7 +3,7 @@ package kvraft
 import "../labrpc"
 import "crypto/rand"
 import "math/big"
-import "fmt"
+//import "fmt"
 
 type Clerk struct {
 	servers []*labrpc.ClientEnd
@@ -45,11 +45,11 @@ func MakeClerk(servers []*labrpc.ClientEnd) *Clerk {
 func (ck *Clerk) Get(key string) string {
 
 	// You will have to modify this function.
-	ck.seq++
+	//ck.seq++
 	servernum := len(ck.servers)
 	nserver := ck.lastleader
 	for {
-		fmt.Printf("nserver: %v get once,key:%v, clerkid %v",nserver, key, ck.clerkid)
+		//fmt.Printf("nserver: %v get once,key:%v, clerkid %v",nserver, key, ck.clerkid)
 		args := GetArgs{
 			Key : key,
 			Clerkid : ck.clerkid,
@@ -91,7 +91,7 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 	servernum := len(ck.servers)
 	nserver := ck.lastleader
 	for opsucceed == false {
-		fmt.Printf("nserver: %v put once,key:%v,value:%v, clerkid %v.\n",nserver, key, value, ck.clerkid)
+		//fmt.Printf("nserver: %v put once,key:%v,value:%v, clerkid %v.\n",nserver, key, value, ck.clerkid)
 		args := PutAppendArgs{
 			Key : key,
 			Value : value,
@@ -100,9 +100,9 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			Seq : ck.seq,
 		}
 		reply := PutAppendReply{}
-		reply.Err = "nothing"
+		//reply.Err = "nothing"
 		ok := ck.servers[nserver].Call("KVServer.PutAppend", &args, &reply);
-		fmt.Printf("nserver: %v put once,key:%v,value:%v overrrr. reply %v\n",nserver, key, value, reply.Err)
+		//fmt.Printf("nserver: %v put once,key:%v,value:%v overrrr. reply %v\n",nserver, key, value, reply.Err)
 		if reply.Err == ErrdupTwice {
 			break
 		}
@@ -115,6 +115,8 @@ func (ck *Clerk) PutAppend(key string, value string, op string) {
 			opsucceed = true
 			ck.lastleader = nserver
 			break
+		}else {
+			nserver++
 		}
 		nserver = nserver % servernum
 	}
